@@ -7,8 +7,11 @@ import {
   Plus,
   ShieldCheck,
   Server,
-  Database
+  Database,
+  Sun,
+  Moon
 } from 'lucide-react';
+import { useTheme } from '../../context/ThemeContext';
 import { useBrand } from '../../context/BrandContext';
 import { useAuth } from '../../context/AuthContext';
 import { Button } from '../common/Button';
@@ -18,6 +21,7 @@ export const Header = ({ setMobileOpen }) => {
   const location = useLocation();
   const { activeBrand } = useBrand();
   const { supabaseStatus } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -88,6 +92,19 @@ export const Header = ({ setMobileOpen }) => {
 
       {/* Right Actions */}
       <div className="flex items-center gap-2.5">
+        {/* Dark / Light Theme Toggle */}
+<button
+  onClick={toggleTheme}
+  className="p-2 rounded-xl border border-[#24334b] bg-[#111b2e] text-sky-400 hover:bg-[#17243b] transition-all"
+  title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+  aria-label="Toggle color theme"
+>
+  {theme === 'dark' ? (
+    <Sun className="w-4 h-4" />
+  ) : (
+    <Moon className="w-4 h-4" />
+  )}
+</button>
         {/* Backend Architecture Status Pill */}
         <button
           onClick={() => setShowStatusModal(!showStatusModal)}
