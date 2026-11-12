@@ -1,199 +1,578 @@
+
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { MOCK_REPORTS } from '../data/mockData';
 
 const SERVER_API_URL = import.meta.env.VITE_COMPLIANCE_API_URL;
+const AUTH_USER_KEY = 'brandguard_auth_user';
+
+const isDemoSession = () => {
+  try {
+    const user = JSON.parse(
+      localStorage.getItem(AUTH_USER_KEY) || 'null'
+    );
+    return Boolean(user?.isMock);
+  } catch {
+    return false;
+  }
+};
+
+const escapeRegex = (value) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const createPatternRegex = (pattern) => {
+  const escaped = escapeRegex(pattern.trim())
+    .replace(/\s+/g, '\\s+');
+
+  return new RegExp(`\\b${escaped}\\b`, 'gi');
+};
+
+const splitPatterns = (pattern) =>
+  (pattern || '')
+    .split('|')
+    .map(item => item.trim())
+    .filter(Boolean);
+
+const getDeduction = (severity) => {
+  switch ((severity || 'warning').toLowerCase()) {
+    case 'critical':
+      return 14;
+    case 'warning':
+      return 8;
+    case 'suggestion':
+      return 4;
+    default:
+      return 6;
+  }
+};
+
+const getSuggestedAlternative = (rule) =>
+  rule.preferred_alternative || '';
+
+const mapViolation = (row) => ({
+  id: row.id,
+  ruleId: row.rule_id,
+  category: row.category,
+  severity: row.severity,
+  flaggedText: row.flagged_text,
+  locationContext: row.location_context,
+  startCharIndex: row.start_char_index,
+  endCharIndex: row.end_char_index,
+  rule: row.location_context || 'Brand guideline rule',
+  explanation: row.issue_description,
+  suggestedFix: row.suggested_fix,
+  status: row.status
+});
+
+const mapReport = (row, violations = []) => {
+  const raw = row.raw_analysis || {};
+
+  return {
+    ...raw,
+    id: row.id,
+    submissionId: row.submission_id,
+    overallScore: Number(row.overall_score),
+    grade: row.grade,
+    verdict: row.verdict,
+    analyzedAt: row.created_at,
+    executionTimeMs: row.execution_time_ms,
+    engineType: row.ai_model_used || 'Client Rule-Based Engine',
+    isMock: false,
+    categoryScores: {
+      tone: Number(row.tone_score ?? 100),
+      terminology: Number(row.terminology_score ?? 100),
+      legal: Number(row.legal_score ?? 100),
+      formatting: Number(row.formatting_score ?? 100)
+    },
+    summary: row.summary,
+    improvedVersion: raw.improvedVersion || '',
+    violations
+  };
+};
+
+const fetchViolations = async (reportId) => {
+  const { data, error } = await supabase
+    .from('compliance_violations')
+    .select('*')
+    .eq('report_id', reportId)
+    .order('start_char_index', { ascending: true });
+
+  if (error) throw error;
+
+  return (data || []).map(mapViolation);
+};
+
+const persistReport = async (report, submissionId) => {
+  if (!submissionId || isDemoSession()) {
+    return report;
+  }
+
+  if (!isSupabaseConfigured() || !supabase) {
+    throw new Error('Supabase is not configured. Cannot save the compliance report.');
+  }
+
+  const categoryScores = report.categoryScores || {};
+
+  const reportPayload = {
+    submission_id: submissionId,
+    overall_score: report.overallScore,
+    grade: report.grade,
+    verdict: report.verdict,
+    tone_score: categoryScores.tone ?? 100,
+    terminology_score: categoryScores.terminology ?? 100,
+    legal_score: categoryScores.legal ?? 100,
+    formatting_score: categoryScores.formatting ?? 100,
+    summary: report.summary || 'Compliance audit completed.',
+    suggested_improvements: report.improvedVersion || null,
+    ai_model_used: report.engineType || 'Client Rule-Based Engine (Deterministic)',
+    execution_time_ms: Number.isInteger(report.executionTimeMs)
+      ? report.executionTimeMs
+      : null,
+    raw_analysis: {
+      improvedVersion: report.improvedVersion || '',
+      engineType: report.engineType || 'Client Rule-Based Engine (Deterministic)'
+    }
+  };
+
+  const { data: savedReport, error: reportError } = await supabase
+    .from('compliance_reports')
+    .insert(reportPayload)
+    .select()
+    .single();
+
+  if (reportError) throw reportError;
+
+  const violations = (report.violations || []).map(violation => ({
+    report_id: savedReport.id,
+    rule_id: violation.ruleId || null,
+    category: violation.category,
+    severity: violation.severity || 'warning',
+    flagged_text: violation.flaggedText || '',
+    location_context: violation.rule || null,
+    start_char_index: Number.isInteger(violation.startCharIndex)
+      ? violation.startCharIndex
+      : null,
+    end_char_index: Number.isInteger(violation.endCharIndex)
+      ? violation.endCharIndex
+      : null,
+    issue_description: violation.explanation || 'Brand guideline violation.',
+    suggested_fix: violation.suggestedFix || null,
+    status: 'open'
+  }));
+
+  if (violations.length > 0) {
+    const { error: violationsError } = await supabase
+      .from('compliance_violations')
+      .insert(violations);
+
+    if (violationsError) {
+      throw new Error(
+        `The report was saved, but its violations could not be saved: ${violationsError.message}`
+      );
+    }
+  }
+
+  const savedViolations = await fetchViolations(savedReport.id);
+  const result = mapReport(savedReport, savedViolations);
+
+  sessionStorage.setItem(
+    `brandguard_report_${result.id}`,
+    JSON.stringify(result)
+  );
+
+  return result;
+};
 
 export const complianceService = {
-  /**
-   * Evaluates content against Brand Guidelines.
-   * If a backend LLM proxy server is configured and reachable, delegates to it.
-   * Otherwise, executes a transparent deterministic rule-based evaluation.
-   */
-  async runComplianceCheck({ contentBody, guideline, channel = 'Blog Post' }) {
-    if (SERVER_API_URL && !SERVER_API_URL.includes('localhost:3001')) {
+  async runComplianceCheck({
+    contentBody,
+    guideline,
+    channel = 'Blog Post',
+    submissionId = null
+  }) {
+    if (!contentBody?.trim()) {
+      throw new Error('Please enter content before running the audit.');
+    }
+
+    if (!guideline) {
+      throw new Error('Please select an active brand guideline.');
+    }
+
+    const startedAt = Date.now();
+    let report;
+
+    if (SERVER_API_URL) {
       try {
         const response = await fetch(SERVER_API_URL, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json'
+          },
           body: JSON.stringify({
             contentBody,
             channel,
-            guidelineId: guideline?.id,
-            brandRules: guideline?.bannedWords
+            guidelineId: guideline.id,
+            brandRules: guideline.rules || [],
+            requiredDisclaimers: guideline.requiredDisclaimers || [],
+            toneTraits: guideline.toneTraits || []
           })
         });
 
         if (response.ok) {
           const remoteData = await response.json();
-          return {
+
+          report = {
             ...remoteData,
-            engineType: 'Server-Side Secure LLM Proxy',
+            engineType: 'Server-Side Compliance API',
             isMock: false
           };
+        } else {
+          console.warn(
+            'Compliance API returned an error. Using local rule engine.'
+          );
         }
-      } catch (err) {
-        console.warn('Backend LLM proxy unreachable, falling back to local deterministic rule engine:', err.message);
+      } catch (error) {
+        console.warn(
+          'Compliance API unavailable. Using local rule engine:',
+          error.message
+        );
       }
     }
 
-    return this.evaluateRulesLocally(contentBody, guideline, channel);
+    if (!report) {
+      report = this.evaluateRulesLocally(
+        contentBody,
+        guideline,
+        channel
+      );
+    }
+
+    report.executionTimeMs = Date.now() - startedAt;
+
+    if (submissionId && !isDemoSession()) {
+      report = await persistReport(report, submissionId);
+    } else {
+      sessionStorage.setItem(
+        `brandguard_report_${report.id}`,
+        JSON.stringify(report)
+      );
+    }
+
+    return report;
   },
 
-  /**
-   * Deterministic real rule evaluation based on active brand guidelines.
-   * This inspects actual keywords, patterns, and active guideline rules.
-   */
-  evaluateRulesLocally(text, guideline, channel) {
+  evaluateRulesLocally(text, guideline, channel = 'Blog Post') {
     const violations = [];
-    let deduction = 0;
     const lowerText = text.toLowerCase();
 
-    // Rule Category 1: Banned Words & Jargon from active guideline
-    const bannedWords = guideline?.bannedWords || [
-      { word: 'revolutionary', reason: 'Overused hyperbole. Replace with concrete technical capability.', severity: 'warning', alternative: 'innovative' },
-      { word: 'game-changer', reason: 'Cliché phrase banned in brand voice.', severity: 'warning', alternative: 'transformational catalyst' },
-      { word: 'synergy', reason: 'Vague buzzword. State specific integration outcome.', severity: 'warning', alternative: 'seamless interoperability' },
-      { word: 'foolproof', reason: 'Engineering inaccurate claim.', severity: 'critical', alternative: 'fault-tolerant' },
-      { word: 'cheap', reason: 'Brand equity degradation. Prefer cost-effective.', severity: 'suggestion', alternative: 'cost-effective' },
-      { word: 'guaranteed', reason: 'Unverified promise without legal SLA.', severity: 'critical', alternative: 'architecturally supported' }
-    ];
+    const deductionsByCategory = {
+      tone: 0,
+      terminology: 0,
+      legal: 0,
+      formatting: 0
+    };
 
-    bannedWords.forEach((bannedItem) => {
-      const term = (bannedItem.word || bannedItem).toLowerCase();
-      const regex = new RegExp(`\\b${term}\\b`, 'gi');
-      let match;
-      while ((match = regex.exec(text)) !== null) {
-        const itemSeverity = bannedItem.severity || 'warning';
-        deduction += itemSeverity === 'critical' ? 14 : itemSeverity === 'warning' ? 8 : 4;
-        
-        const fallbackAlternative =
-          term === 'cheap' ? 'cost-effective' :
-          term === 'revolutionary' ? 'innovative' :
-          term === 'foolproof' ? 'fault-tolerant' :
-          term === 'game-changer' ? 'transformative' :
-          term === 'synergy' ? 'seamless interoperability' :
-          'high-performance';
+    let totalDeduction = 0;
+    let improvedVersion = text;
 
-        violations.push({
-          id: `viol-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-          category: 'terminology',
-          severity: itemSeverity,
-          flaggedText: match[0],
-          rule: `Banned Term: "${term}"`,
-          explanation: bannedItem.reason || 'Prohibited by brand style standards.',
-          suggestedFix: bannedItem.alternative || fallbackAlternative
+    const databaseRules = Array.isArray(guideline?.rules)
+      ? guideline.rules.filter(rule => rule.is_active !== false)
+      : [];
+
+    const rules = databaseRules.length
+      ? databaseRules
+      : (guideline?.bannedWords || []).map(item => ({
+          id: item.id || null,
+          category: item.category || 'terminology',
+          rule_name: item.ruleName || 'Brand terminology rule',
+          severity: item.severity || 'warning',
+          banned_pattern: item.word || item,
+          preferred_alternative: item.alternative || '',
+          explanation: item.reason || 'Prohibited by the brand guideline.',
+          is_active: true
+        }));
+
+    const addViolation = ({
+      category,
+      severity,
+      flaggedText,
+      ruleId = null,
+      ruleName,
+      explanation,
+      suggestedFix = '',
+      startCharIndex = null,
+      endCharIndex = null
+    }) => {
+      const normalizedCategory =
+        category === 'banned' ? 'terminology' : category;
+
+      if (!Object.hasOwn(deductionsByCategory, normalizedCategory)) {
+        return;
+      }
+
+      const deduction = getDeduction(severity);
+
+      totalDeduction += deduction;
+      deductionsByCategory[normalizedCategory] += deduction;
+
+      violations.push({
+        id: `viol-${Date.now()}-${violations.length}`,
+        ruleId,
+        category: normalizedCategory,
+        severity: severity || 'warning',
+        flaggedText,
+        rule: ruleName,
+        explanation,
+        suggestedFix,
+        startCharIndex,
+        endCharIndex
+      });
+    };
+
+    // 1. Evaluate active brand rules.
+    rules.forEach(rule => {
+      const category =
+        rule.category === 'banned'
+          ? 'terminology'
+          : rule.category;
+
+      if (!Object.hasOwn(deductionsByCategory, category)) {
+        return;
+      }
+
+      const patterns = splitPatterns(rule.banned_pattern);
+
+      patterns.forEach(pattern => {
+        const regex = createPatternRegex(pattern);
+        let match;
+
+        if (
+          category === 'formatting' &&
+          /first mention/i.test(rule.rule_name || '')
+        ) {
+          match = regex.exec(text);
+
+          if (match && match[0] !== pattern) {
+            addViolation({
+              category,
+              severity: rule.severity,
+              flaggedText: match[0],
+              ruleId: rule.id || null,
+              ruleName: rule.rule_name,
+              explanation: rule.explanation,
+              suggestedFix: pattern,
+              startCharIndex: match.index,
+              endCharIndex: match.index + match[0].length
+            });
+
+            improvedVersion = improvedVersion.replace(
+              createPatternRegex(match[0]),
+              pattern
+            );
+          }
+
+          return;
+        }
+
+        while ((match = regex.exec(text)) !== null) {
+          const alternative = getSuggestedAlternative(rule);
+
+          addViolation({
+            category,
+            severity: rule.severity,
+            flaggedText: match[0],
+            ruleId: rule.id || null,
+            ruleName: rule.rule_name,
+            explanation: rule.explanation,
+            suggestedFix: alternative,
+            startCharIndex: match.index,
+            endCharIndex: match.index + match[0].length
+          });
+
+          if (alternative) {
+            improvedVersion = improvedVersion.replace(
+              createPatternRegex(pattern),
+              alternative
+            );
+          }
+        }
+      });
+    });
+
+    // 2. Check mandatory disclaimers.
+    const disclaimers = guideline?.requiredDisclaimers || [];
+
+    disclaimers.forEach(disclaimer => {
+      const disclaimerText =
+        typeof disclaimer === 'string'
+          ? disclaimer
+          : disclaimer.text;
+
+      if (!disclaimerText?.trim()) return;
+
+      const context =
+        typeof disclaimer === 'string'
+          ? 'all'
+          : (disclaimer.context || 'all');
+
+      const mandatory =
+        typeof disclaimer === 'string'
+          ? true
+          : disclaimer.mandatory !== false;
+
+      const normalizedContext = context.toLowerCase();
+      const normalizedChannel = channel.toLowerCase();
+
+      const appliesToChannel =
+        normalizedContext === 'all' ||
+        normalizedContext === 'general' ||
+        normalizedContext === 'any' ||
+        normalizedContext.includes(normalizedChannel) ||
+        normalizedChannel.includes(normalizedContext);
+
+      if (!appliesToChannel) return;
+
+      if (!lowerText.includes(disclaimerText.toLowerCase())) {
+        addViolation({
+          category: 'legal',
+          severity: mandatory ? 'critical' : 'warning',
+          flaggedText: 'Required disclaimer missing',
+          ruleId: null,
+          ruleName: 'Mandatory Brand Disclaimer',
+          explanation: `The required disclaimer for ${context} is missing from the submitted content.`,
+          suggestedFix: `Add this disclaimer: ${disclaimerText}`
         });
       }
     });
 
-    // Rule Category 2: Legal Disclaimers & Absolute Claims
-    if (lowerText.includes('guarantee') || lowerText.includes('foolproof') || lowerText.includes('100% uptime')) {
-      deduction += 16;
-      violations.push({
-        id: `viol-legal-${Date.now()}`,
-        category: 'legal',
-        severity: 'critical',
-        flaggedText: 'Absolute reliability / guarantee claim',
-        rule: 'Unverified SLA & Liability Disclaimer',
-        explanation: 'Legal guidelines prohibit promises of absolute outcomes or 100% uptime without explicit SLA caveats.',
-        suggestedFix: 'engineered for high availability backed by standard enterprise SLA commitments'
-      });
-    }
+    // 3. Calculate scores.
+    const overallScore = Math.max(
+      0,
+      Math.min(100, 100 - totalDeduction)
+    );
 
-    // Rule Category 3: Brand Name Capitalization
-    if (text.includes('acme') && !text.includes('Acme Global Cloud') && !text.includes('Acme')) {
-      deduction += 6;
-      violations.push({
-        id: `viol-brand-${Date.now()}`,
-        category: 'formatting',
-        severity: 'suggestion',
-        flaggedText: 'acme',
-        rule: 'Brand Name Casing',
-        explanation: 'The brand name must always be capitalized as "Acme Global Cloud" on first mention.',
-        suggestedFix: 'Acme Global Cloud'
-      });
-    }
+    const categoryScores = {
+      tone: Math.max(0, 100 - deductionsByCategory.tone),
+      terminology: Math.max(0, 100 - deductionsByCategory.terminology),
+      legal: Math.max(0, 100 - deductionsByCategory.legal),
+      formatting: Math.max(0, 100 - deductionsByCategory.formatting)
+    };
 
-    // Rule Category 4: Exclamation mark restraint
-    const exclamationCount = (text.match(/!/g) || []).length;
-    if (exclamationCount > 1) {
-      deduction += 6;
-      violations.push({
-        id: `viol-tone-${Date.now()}`,
-        category: 'tone',
-        severity: 'suggestion',
-        flaggedText: `${exclamationCount} exclamation marks found`,
-        rule: 'Tone: Professional Restraint',
-        explanation: 'Brand guidelines advise limiting exclamation marks in corporate communications to maintain an authoritative demeanor.',
-        suggestedFix: 'Replace excessive exclamations with periods.'
-      });
-    }
-
-    // Calculate score
-    const overallScore = Math.max(32, Math.min(99, 100 - deduction));
     let verdict = 'Passed — Ready for Publication';
+
     if (overallScore < 70) {
       verdict = 'Action Required: Significant Brand & Legal Violations';
     } else if (overallScore < 90) {
       verdict = 'Needs Minor Revisions Before Approval';
     }
 
-    const toneScore = Math.max(40, 100 - (violations.filter(v => v.category === 'tone').length * 15));
-    const terminologyScore = Math.max(40, 100 - (violations.filter(v => v.category === 'terminology').length * 12));
-    const legalScore = Math.max(30, 100 - (violations.filter(v => v.category === 'legal').length * 25));
-    const formattingScore = Math.max(50, 100 - (violations.filter(v => v.category === 'formatting').length * 10));
+    const grade =
+      overallScore >= 90 ? 'A' :
+      overallScore >= 80 ? 'B' :
+      overallScore >= 70 ? 'C' : 'F';
 
-    // Improved version synthesis
-    let improvedVersion = text;
-    violations.forEach(v => {
-      if (v.flaggedText && v.suggestedFix && v.category === 'terminology') {
-        const regex = new RegExp(`\\b${v.flaggedText}\\b`, 'gi');
-        improvedVersion = improvedVersion.replace(regex, v.suggestedFix);
-      }
-    });
-
-    const reportId = `rep-${Date.now()}`;
-    const reportData = {
-      id: reportId,
+    return {
+      id: `rep-${Date.now()}`,
       overallScore,
-      grade: overallScore >= 90 ? 'A' : overallScore >= 80 ? 'B' : overallScore >= 70 ? 'C' : 'F',
+      grade,
       verdict,
       analyzedAt: new Date().toISOString(),
-      executionTimeMs: 420,
+      executionTimeMs: null,
       engineType: 'Client Rule-Based Engine (Deterministic)',
-      isMock: true,
-      categoryScores: {
-        tone: toneScore,
-        terminology: terminologyScore,
-        legal: legalScore,
-        formatting: formattingScore
-      },
+      isMock: false,
+      categoryScores,
       summary: violations.length > 0
-        ? `Audit completed. Detected ${violations.length} policy issues across terminology, tone, and legal disclaimers. Addressing suggested revisions will raise score to ~96%.`
-        : 'Exemplary submission. Zero guideline violations detected. Tone matches brand standards.',
+        ? `Audit completed. Found ${violations.length} issue(s) across the active brand rules and applicable disclaimers. Review the suggested corrections before publication.`
+        : 'Audit completed. No violations were detected in the active rules and applicable disclaimers.',
       violations,
       improvedVersion
     };
-
-    sessionStorage.setItem(`brandguard_report_${reportId}`, JSON.stringify(reportData));
-    return reportData;
   },
 
   async getReportById(reportId) {
-    if (reportId) {
-      const cached = sessionStorage.getItem(`brandguard_report_${reportId}`);
+    if (!reportId) return null;
+
+    // Demo reports remain local.
+    if (isDemoSession() || String(reportId).startsWith('rep-')) {
+      const cached = sessionStorage.getItem(
+        `brandguard_report_${reportId}`
+      );
+
       if (cached) {
         try {
           return JSON.parse(cached);
-        } catch {}
+        } catch {
+          console.warn('Could not parse the cached compliance report.');
+        }
       }
+
+      return MOCK_REPORTS[reportId] || null;
     }
-    return MOCK_REPORTS[reportId] || MOCK_REPORTS['rep-101'];
+
+    if (!isSupabaseConfigured() || !supabase) {
+      throw new Error('Supabase is not configured.');
+    }
+
+    const { data, error } = await supabase
+      .from('compliance_reports')
+      .select('*')
+      .eq('id', reportId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return null;
+
+    const violations = await fetchViolations(data.id);
+    const report = mapReport(data, violations);
+
+    sessionStorage.setItem(
+      `brandguard_report_${report.id}`,
+      JSON.stringify(report)
+    );
+
+    return report;
+  },
+
+  async getLatestReportForSubmission(submissionId) {
+    if (!submissionId) return null;
+
+    if (isDemoSession()) {
+      return null;
+    }
+
+    if (!isSupabaseConfigured() || !supabase) {
+      throw new Error('Supabase is not configured.');
+    }
+
+    const { data, error } = await supabase
+      .from('compliance_reports')
+      .select('*')
+      .eq('submission_id', submissionId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return null;
+
+    const violations = await fetchViolations(data.id);
+    const report = mapReport(data, violations);
+
+    sessionStorage.setItem(
+      `brandguard_report_${report.id}`,
+      JSON.stringify(report)
+    );
+
+    return report;
   },
 
   saveReport(report) {
     if (report?.id) {
-      sessionStorage.setItem(`brandguard_report_${report.id}`, JSON.stringify(report));
+      sessionStorage.setItem(
+        `brandguard_report_${report.id}`,
+        JSON.stringify(report)
+      );
     }
+
     return report;
   }
 };

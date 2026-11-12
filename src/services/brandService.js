@@ -1,171 +1,398 @@
+
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { MOCK_BRANDS, MOCK_GUIDELINES } from '../data/mockData';
 
 const GUIDELINES_STORAGE_KEY = 'brandguard_guidelines_cache';
 
+const readGuidelineCache = () => {
+  try {
+    return JSON.parse(
+      localStorage.getItem(GUIDELINES_STORAGE_KEY) || '[]'
+    );
+  } catch {
+    return [];
+  }
+};
+
+// Convert database rules into the format used by BrandGuard AI.
+const mapGuideline = (
+  guideline,
+  rules,
+  disclaimers,
+  taglines,
+  toneTraits
+) => {
+  const activeRules = rules.filter(
+    rule => rule.guideline_id === guideline.id && rule.is_active
+  );
+
+  // Split pipe-separated patterns into individual terms.
+  const bannedWords = activeRules
+    .filter(rule =>
+      ['banned', 'terminology'].includes(rule.category)
+    )
+    .flatMap(rule =>
+      (rule.banned_pattern || '')
+        .split('|')
+        .map(pattern => pattern.trim())
+        .filter(Boolean)
+        .map(pattern => ({
+          id: rule.id,
+          word: pattern,
+          reason: rule.explanation,
+          severity: rule.severity,
+          alternative: rule.preferred_alternative || '',
+          ruleName: rule.rule_name,
+          category: rule.category
+        }))
+    );
+
+  const guidelineDisclaimers = disclaimers
+    .filter(item =>
+      item.guideline_id === guideline.id && item.is_mandatory
+    )
+    .map(item => ({
+      id: item.id,
+      text: item.disclaimer_text,
+      context: item.channel_or_context,
+      mandatory: item.is_mandatory
+    }));
+
+  const guidelineTaglines = taglines
+    .filter(item => item.guideline_id === guideline.id)
+    .map(item => ({
+      id: item.id,
+      tagline: item.tagline,
+      context: item.context_notes,
+      isPrimary: item.is_primary
+    }));
+
+  const guidelineToneTraits = toneTraits
+    .filter(item => item.guideline_id === guideline.id)
+    .map(item => ({
+      id: item.id,
+      trait: item.trait,
+      rating: item.rating,
+      description: item.description
+    }));
+
+  return {
+    ...guideline,
+
+    // All active database rules.
+    rules: activeRules,
+
+    // Compatibility with the existing compliance evaluator.
+    bannedWords,
+
+    // Rules separated by category.
+    legalRules: activeRules.filter(
+      rule => rule.category === 'legal'
+    ),
+
+    terminologyRules: activeRules.filter(
+      rule => rule.category === 'terminology'
+    ),
+
+    formattingRules: activeRules.filter(
+      rule => rule.category === 'formatting'
+    ),
+
+    toneRules: activeRules.filter(
+      rule => rule.category === 'tone'
+    ),
+
+    requiredDisclaimers: guidelineDisclaimers,
+    taglines: guidelineTaglines,
+    toneTraits: guidelineToneTraits
+  };
+};
+
 export const brandService = {
-  async getBrands() {
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        const { data, error } = await supabase.from('brands').select('*').order('name');
-        if (error) throw error;
-        if (data && data.length > 0) return data;
-      } catch (err) {
-        console.warn('Supabase getBrands fallback to mock:', err.message);
-      }
+  async getBrands(organisationId, { allowMock = false } = {}) {
+    if (allowMock) {
+      return MOCK_BRANDS;
     }
-    return MOCK_BRANDS;
+
+    if (!isSupabaseConfigured() || !supabase) {
+      throw new Error('Supabase is not configured.');
+    }
+
+    if (!organisationId) {
+      throw new Error('No active organisation selected.');
+    }
+
+    const { data, error } = await supabase
+      .from('brands')
+      .select('*')
+      .eq('organisation_id', organisationId)
+      .order('name');
+
+    if (error) throw error;
+
+    return data || [];
   },
 
-  async getGuidelines(brandId) {
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        let query = supabase.from('brand_guidelines').select('*');
-        if (brandId) query = query.eq('brand_id', brandId);
-        const { data, error } = await query;
-        if (error) throw error;
-        if (data && data.length > 0) return data;
-      } catch (err) {
-        console.warn('Supabase getGuidelines fallback to mock:', err.message);
-      }
+  async getGuidelines(brandId, { allowMock = false } = {}) {
+    if (allowMock) {
+      return brandId
+        ? MOCK_GUIDELINES.filter(g => g.brandId === brandId)
+        : MOCK_GUIDELINES;
     }
 
-    const stored = localStorage.getItem(GUIDELINES_STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        if (brandId) return parsed.filter(g => g.brandId === brandId);
-        return parsed;
-      } catch {
-        // Fallback
-      }
+    if (!isSupabaseConfigured() || !supabase) {
+      throw new Error('Supabase is not configured.');
     }
-    // Initialize storage with clone of mock guidelines
-    localStorage.setItem(GUIDELINES_STORAGE_KEY, JSON.stringify(MOCK_GUIDELINES));
-    return brandId ? MOCK_GUIDELINES.filter(g => g.brandId === brandId) : MOCK_GUIDELINES;
+
+    if (!brandId) return [];
+
+    const { data: guidelines, error } = await supabase
+      .from('brand_guidelines')
+      .select('*')
+      .eq('brand_id', brandId);
+
+    if (error) throw error;
+
+    if (!guidelines?.length) return [];
+
+    const guidelineIds = guidelines.map(item => item.id);
+
+    const [
+      rulesResult,
+      disclaimersResult,
+      taglinesResult,
+      toneResult
+    ] = await Promise.all([
+      supabase
+        .from('brand_rules')
+        .select('*')
+        .in('guideline_id', guidelineIds),
+
+      supabase
+        .from('brand_disclaimers')
+        .select('*')
+        .in('guideline_id', guidelineIds),
+
+      supabase
+        .from('brand_taglines')
+        .select('*')
+        .in('guideline_id', guidelineIds),
+
+      supabase
+        .from('brand_tone_traits')
+        .select('*')
+        .in('guideline_id', guidelineIds)
+    ]);
+
+    if (rulesResult.error) throw rulesResult.error;
+    if (disclaimersResult.error) throw disclaimersResult.error;
+    if (taglinesResult.error) throw taglinesResult.error;
+    if (toneResult.error) throw toneResult.error;
+
+    return guidelines.map(guideline =>
+      mapGuideline(
+        guideline,
+        rulesResult.data || [],
+        disclaimersResult.data || [],
+        taglinesResult.data || [],
+        toneResult.data || []
+      )
+    );
   },
 
   async saveGuideline(guideline) {
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        const { data, error } = await supabase.from('brand_guidelines').upsert(guideline).select().single();
-        if (error) throw error;
-        return data;
-      } catch (err) {
-        console.warn('Supabase saveGuideline fallback:', err.message);
-      }
+    if (!isSupabaseConfigured() || !supabase) {
+      throw new Error('Supabase is not configured.');
     }
 
-    const stored = localStorage.getItem(GUIDELINES_STORAGE_KEY);
-    let list = stored ? JSON.parse(stored) : [...MOCK_GUIDELINES];
-    const index = list.findIndex(g => g.id === guideline.id);
-    if (index >= 0) {
-      list[index] = { ...list[index], ...guideline, updatedAt: new Date().toISOString() };
-    } else {
-      list.unshift({ ...guideline, id: guideline.id || `g-${Date.now()}`, createdAt: new Date().toISOString() });
+    const payload = {
+      brand_id: guideline.brand_id || guideline.brandId,
+      name: guideline.name,
+      version: guideline.version || 'v1.0',
+      reading_level:
+        guideline.reading_level || guideline.readingLevel,
+      is_active: guideline.is_active ?? true
+    };
+
+    if (guideline.id) {
+      payload.id = guideline.id;
     }
-    localStorage.setItem(GUIDELINES_STORAGE_KEY, JSON.stringify(list));
-    return guideline;
+
+    const { data, error } = await supabase
+      .from('brand_guidelines')
+      .upsert(payload)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return data;
   },
 
-  async addRule(guidelineId, { category, word, reason, severity = 'warning', alternative = '', disclaimer = '', tagline = '', trait = null }) {
-    const list = await this.getGuidelines();
-    const gIndex = list.findIndex(g => g.id === guidelineId);
-    if (gIndex === -1) return null;
+  // Existing local demo guideline editing.
+  async addRule(
+    guidelineId,
+    {
+      category,
+      word,
+      reason,
+      severity = 'warning',
+      alternative = '',
+      disclaimer = '',
+      tagline = '',
+      trait = null
+    }
+  ) {
+    const list = readGuidelineCache();
+    const index = list.findIndex(g => g.id === guidelineId);
 
-    const guideline = { ...list[gIndex] };
+    if (index === -1) {
+      throw new Error(
+        'Guideline not found in local cache.'
+      );
+    }
+
+    const guideline = { ...list[index] };
 
     if (category === 'banned') {
-      const currentBanned = guideline.bannedWords || [];
-      const newEntry = {
+      const entry = {
         id: `rule-${Date.now()}`,
         word: word.trim().toLowerCase(),
         reason: reason.trim(),
         severity,
         alternative: alternative.trim() || undefined
       };
-      guideline.bannedWords = [newEntry, ...currentBanned.filter(b => (b.word || b).toLowerCase() !== newEntry.word)];
+
+      guideline.bannedWords = [
+        entry,
+        ...(guideline.bannedWords || []).filter(
+          item => (item.word || item).toLowerCase() !== entry.word
+        )
+      ];
     } else if (category === 'disclaimers') {
-      const currentDisc = guideline.requiredDisclaimers || [];
-      guideline.requiredDisclaimers = [disclaimer.trim(), ...currentDisc];
+      guideline.requiredDisclaimers = [
+        disclaimer.trim(),
+        ...(guideline.requiredDisclaimers || [])
+      ];
     } else if (category === 'taglines') {
-      const currentTags = guideline.taglines || [];
-      guideline.taglines = [tagline.trim(), ...currentTags];
+      guideline.taglines = [
+        tagline.trim(),
+        ...(guideline.taglines || [])
+      ];
     } else if (category === 'tone' && trait) {
-      const currentTone = guideline.toneTraits || [];
-      guideline.toneTraits = [...currentTone.filter(t => t.trait !== trait.trait), trait];
+      guideline.toneTraits = [
+        ...(guideline.toneTraits || []).filter(
+          item => item.trait !== trait.trait
+        ),
+        trait
+      ];
     }
 
-    list[gIndex] = guideline;
-    localStorage.setItem(GUIDELINES_STORAGE_KEY, JSON.stringify(list));
+    list[index] = guideline;
+
+    localStorage.setItem(
+      GUIDELINES_STORAGE_KEY,
+      JSON.stringify(list)
+    );
+
     return guideline;
   },
 
   async updateRule(guidelineId, ruleKey, updatedData) {
-    const list = await this.getGuidelines();
-    const gIndex = list.findIndex(g => g.id === guidelineId);
-    if (gIndex === -1) return null;
+    const list = readGuidelineCache();
+    const index = list.findIndex(g => g.id === guidelineId);
 
-    const guideline = { ...list[gIndex] };
+    if (index === -1) return null;
+
+    const guideline = { ...list[index] };
 
     if (updatedData.category === 'banned') {
-      guideline.bannedWords = (guideline.bannedWords || []).map(b => {
-        const itemKey = b.id || b.word;
-        if (itemKey === ruleKey || b.word === ruleKey) {
-          return {
-            ...b,
-            word: updatedData.word.trim().toLowerCase(),
-            reason: updatedData.reason.trim(),
-            severity: updatedData.severity || b.severity || 'warning',
-            alternative: updatedData.alternative?.trim() || b.alternative
-          };
+      guideline.bannedWords = (guideline.bannedWords || []).map(item => {
+        if ((item.id || item.word) !== ruleKey && item.word !== ruleKey) {
+          return item;
         }
-        return b;
+
+        return {
+          ...item,
+          word: updatedData.word.trim().toLowerCase(),
+          reason: updatedData.reason.trim(),
+          severity: updatedData.severity || item.severity || 'warning',
+          alternative:
+            updatedData.alternative?.trim() || item.alternative
+        };
       });
     } else if (updatedData.category === 'disclaimers') {
-      guideline.requiredDisclaimers = (guideline.requiredDisclaimers || []).map(d =>
-        d === ruleKey ? updatedData.disclaimer.trim() : d
-      );
+      guideline.requiredDisclaimers =
+        (guideline.requiredDisclaimers || []).map(item =>
+          item === ruleKey ? updatedData.disclaimer.trim() : item
+        );
     } else if (updatedData.category === 'taglines') {
-      guideline.taglines = (guideline.taglines || []).map(t =>
-        t === ruleKey ? updatedData.tagline.trim() : t
+      guideline.taglines = (guideline.taglines || []).map(item =>
+        item === ruleKey ? updatedData.tagline.trim() : item
       );
     } else if (updatedData.category === 'tone') {
-      guideline.toneTraits = (guideline.toneTraits || []).map(t =>
-        t.trait === ruleKey ? { ...t, ...updatedData } : t
+      guideline.toneTraits = (guideline.toneTraits || []).map(item =>
+        item.trait === ruleKey ? { ...item, ...updatedData } : item
       );
     }
 
-    list[gIndex] = guideline;
-    localStorage.setItem(GUIDELINES_STORAGE_KEY, JSON.stringify(list));
+    list[index] = guideline;
+
+    localStorage.setItem(
+      GUIDELINES_STORAGE_KEY,
+      JSON.stringify(list)
+    );
+
     return guideline;
   },
 
   async deleteRule(guidelineId, ruleKey, category) {
-    const list = await this.getGuidelines();
-    const gIndex = list.findIndex(g => g.id === guidelineId);
-    if (gIndex === -1) return null;
+    const list = readGuidelineCache();
+    const index = list.findIndex(g => g.id === guidelineId);
 
-    const guideline = { ...list[gIndex] };
+    if (index === -1) return null;
+
+    const guideline = { ...list[index] };
 
     if (category === 'banned') {
-      guideline.bannedWords = (guideline.bannedWords || []).filter(b => (b.id || b.word) !== ruleKey && b.word !== ruleKey);
+      guideline.bannedWords = (guideline.bannedWords || []).filter(
+        item => (item.id || item.word) !== ruleKey && item.word !== ruleKey
+      );
     } else if (category === 'disclaimers') {
-      guideline.requiredDisclaimers = (guideline.requiredDisclaimers || []).filter(d => d !== ruleKey);
+      guideline.requiredDisclaimers =
+        (guideline.requiredDisclaimers || []).filter(
+          item => item !== ruleKey
+        );
     } else if (category === 'taglines') {
-      guideline.taglines = (guideline.taglines || []).filter(t => t !== ruleKey);
+      guideline.taglines = (guideline.taglines || []).filter(
+        item => item !== ruleKey
+      );
     } else if (category === 'tone') {
-      guideline.toneTraits = (guideline.toneTraits || []).filter(t => t.trait !== ruleKey);
+      guideline.toneTraits = (guideline.toneTraits || []).filter(
+        item => item.trait !== ruleKey
+      );
     }
 
-    list[gIndex] = guideline;
-    localStorage.setItem(GUIDELINES_STORAGE_KEY, JSON.stringify(list));
+    list[index] = guideline;
+
+    localStorage.setItem(
+      GUIDELINES_STORAGE_KEY,
+      JSON.stringify(list)
+    );
+
     return guideline;
   },
 
   async resetGuidelines(brandId) {
-    const list = [...MOCK_GUIDELINES];
-    localStorage.setItem(GUIDELINES_STORAGE_KEY, JSON.stringify(list));
-    return brandId ? list.filter(g => g.brandId === brandId) : list;
+    const list = MOCK_GUIDELINES;
+
+    localStorage.setItem(
+      GUIDELINES_STORAGE_KEY,
+      JSON.stringify(list)
+    );
+
+    return brandId
+      ? list.filter(g => g.brandId === brandId)
+      : list;
   }
 };
