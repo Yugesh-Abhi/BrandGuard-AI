@@ -2,7 +2,7 @@
 @import "tailwindcss";
 
 /* =================================
-   BRANDGUARD AI - GLOBAL THEME
+   BRANDGUARD AI - PREMIUM TECH THEME
 ================================= */
 
 :root {
@@ -12,27 +12,32 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  --accent: #38bdf8;
-  --accent-strong: #0ea5e9;
+  /* Brand colors */
+  --accent: #00E5FF;
+  --accent-strong: #00BFD6;
+  --accent-purple: #7000FF;
 }
 
 /* DARK THEME */
 
 :root[data-theme="dark"] {
-  --app-bg: #070b18;
-  --sidebar-bg: #0b1120;
-  --surface: #111b2e;
-  --surface-hover: #17243b;
-  --surface-soft: #0d1729;
-  --border: #24334b;
-  --text-primary: #eaf2ff;
-  --text-secondary: #9aabc2;
-  --text-muted: #71839d;
-  --accent-bg: rgba(56, 189, 248, 0.12);
-  --shadow-color: rgba(0, 0, 0, 0.3);
+  --app-bg: #0A0B10;
+  --sidebar-bg: #0D0F19;
+  --surface: #121420;
+  --surface-hover: #1B1E2D;
+  --surface-soft: #0F111B;
+
+  --border: #272A3B;
+
+  --text-primary: #FFFFFF;
+  --text-secondary: #B0B8CA;
+  --text-muted: #7D879C;
+
+  --accent-bg: rgba(0, 229, 255, 0.10);
+  --shadow-color: rgba(0, 0, 0, 0.35);
 }
 
-/* LIGHT THEME */
+/* LIGHT THEME - PRESERVED */
 
 :root[data-theme="light"] {
   --app-bg: #f3f7fc;
@@ -63,7 +68,6 @@ body {
   overflow-x: hidden;
   background: var(--app-bg);
   color: var(--text-primary);
-  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 button,
@@ -78,7 +82,7 @@ button {
 }
 
 ::selection {
-  background: rgba(14, 165, 233, 0.3);
+  background: rgba(0, 229, 255, 0.25);
   color: var(--text-primary);
 }
 
@@ -119,29 +123,31 @@ button {
 
 .glass-card-hover:hover {
   border-color: var(--accent);
-  box-shadow: 0 10px 35px var(--shadow-color);
+  box-shadow: 0 10px 30px rgba(0, 229, 255, 0.08);
 }
 
 .gradient-text {
-  background: linear-gradient(120deg, #38bdf8, #818cf8);
+  background: linear-gradient(120deg, #00E5FF, #7000FF);
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
+/* CONTROLLED GLOW EFFECTS */
+
 .glow-cyan {
-  box-shadow: 0 0 25px rgba(56, 189, 248, 0.18);
+  box-shadow: 0 0 20px rgba(0, 229, 255, 0.12);
 }
 
 .glow-purple {
-  box-shadow: 0 0 25px rgba(139, 92, 246, 0.18);
+  box-shadow: 0 0 20px rgba(112, 0, 255, 0.16);
 }
 
 .glow-emerald {
-  box-shadow: 0 0 25px rgba(16, 185, 129, 0.18);
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.12);
 }
 
-/* SMOOTH THEME TRANSITIONS */
+/* THEME TRANSITIONS */
 
 * {
   scrollbar-color: var(--border) var(--app-bg);

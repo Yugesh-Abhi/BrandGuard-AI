@@ -1,9 +1,16 @@
+
 import React from 'react';
-import { AlertCircle, AlertTriangle, Clock, Info, ShieldCheck } from 'lucide-react';
+import {
+  AlertCircle,
+  AlertTriangle,
+  Clock,
+  Info,
+  ShieldCheck
+} from 'lucide-react';
 
 export const Badge = ({
   children,
-  variant = 'default', // 'critical' | 'warning' | 'pass' | 'info' | 'neutral' | 'in_review' | 'approved' | 'needs_revision'
+  variant = 'default',
   size = 'sm',
   withIcon = true,
   className = '',
@@ -19,39 +26,44 @@ export const Badge = ({
       case 'action_required':
       case 'rejected':
         return {
-          styles: 'bg-rose-950/60 text-rose-300 border border-rose-500/30',
+          styles: 'bg-rose-500/10 text-rose-400 border border-rose-500/30',
           icon: AlertCircle
         };
+
       case 'warning':
       case 'needs_revision':
       case 'needs revisions':
         return {
-          styles: 'bg-amber-950/60 text-amber-300 border border-amber-500/30',
+          styles: 'bg-amber-500/10 text-amber-400 border border-amber-500/30',
           icon: AlertTriangle
         };
+
       case 'pass':
       case 'passed':
       case 'approved':
         return {
-          styles: 'bg-emerald-950/60 text-emerald-300 border border-emerald-500/30',
+          styles: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30',
           icon: ShieldCheck
         };
+
       case 'in_review':
       case 'in review':
       case 'analyzing':
         return {
-          styles: 'bg-indigo-950/60 text-indigo-300 border border-indigo-500/30',
+          styles: 'bg-[#7000FF]/10 text-purple-300 border border-[#7000FF]/30',
           icon: Clock
         };
+
       case 'suggestion':
       case 'info':
         return {
-          styles: 'bg-cyan-950/60 text-cyan-300 border border-cyan-500/30',
+          styles: 'bg-[#00E5FF]/10 text-[#00E5FF] border border-[#00E5FF]/25',
           icon: Info
         };
+
       default:
         return {
-          styles: 'bg-slate-800 text-slate-300 border border-slate-700',
+          styles: 'bg-[#1B1E2D] text-[#B0B8CA] border border-[#272A3B]',
           icon: null
         };
     }
@@ -60,8 +72,19 @@ export const Badge = ({
   const { styles, icon: IconComponent } = getVariantConfig();
 
   return (
-    <span className={`inline-flex items-center gap-1.5 ${styles} ${sizeStyles[size]} ${className}`}>
-      {withIcon && IconComponent && <IconComponent className="w-3.5 h-3.5 shrink-0" />}
+    <span
+      className={`
+        inline-flex items-center gap-1.5
+        whitespace-nowrap
+        ${styles}
+        ${sizeStyles[size] || sizeStyles.sm}
+        ${className}
+      `}
+    >
+      {withIcon && IconComponent && (
+        <IconComponent className="w-3.5 h-3.5 shrink-0" />
+      )}
+
       <span>{children}</span>
     </span>
   );
