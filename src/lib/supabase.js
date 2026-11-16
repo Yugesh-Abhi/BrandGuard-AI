@@ -13,7 +13,20 @@ if (!supabaseUrl.startsWith('https://') &&
   throw new Error('Invalid Supabase URL. Check VITE_SUPABASE_URL.');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseKey);
+
+export const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true
+  }
+});
 
 export const isSupabaseConfigured = () =>
   Boolean(supabaseUrl && supabaseKey);
+
+
+
+
+
+
