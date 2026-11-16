@@ -45,11 +45,24 @@ export const authService = {
           err.message
         );
       }
+// No Supabase session: restore only an explicitly selected demo user.
+const storedUser = localStorage.getItem(LOCAL_STORAGE_KEY);
 
-      // No authenticated Supabase session.
-      // Do not restore an old demo persona.
-      localStorage.removeItem(LOCAL_STORAGE_KEY);
-      return null;
+if (storedUser) {
+  try {
+    const user = JSON.parse(storedUser);
+
+    if (user?.isMock === true) {
+      return user;
+    }
+  } catch (storageError) {
+    console.warn('Invalid stored demo session:', storageError);
+  }
+}
+
+localStorage.removeItem(LOCAL_STORAGE_KEY);
+return null;
+     
     }
 
     // No automatic demo login in local mode.
